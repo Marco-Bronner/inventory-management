@@ -1,6 +1,7 @@
 import axios from 'axios'
 
-const API_BASE_URL = 'http://localhost:8001/api'
+// Override at runtime with VITE_API_URL (e.g. a different backend port)
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8001/api'
 
 export const api = {
   async getInventory(filters = {}) {
@@ -71,6 +72,21 @@ export const api = {
 
   async getTransactions() {
     const response = await axios.get(`${API_BASE_URL}/spending/transactions`)
+    return response.data
+  },
+
+  async getRestockingRecommendations(budget) {
+    const response = await axios.get(`${API_BASE_URL}/restocking/recommendations`, { params: { budget } })
+    return response.data
+  },
+
+  async createRestockingOrder(orderData) {
+    const response = await axios.post(`${API_BASE_URL}/restocking/orders`, orderData)
+    return response.data
+  },
+
+  async getRestockingOrders() {
+    const response = await axios.get(`${API_BASE_URL}/restocking/orders`)
     return response.data
   },
 
