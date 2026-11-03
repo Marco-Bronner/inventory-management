@@ -25,8 +25,8 @@
           <router-link to="/restocking" :class="{ active: $route.path === '/restocking' }">
             {{ t('nav.restocking') }}
           </router-link>
-          <router-link to="/reports":class="{ active: $route.path === '/reports' }">
-            Reports
+          <router-link to="/reports" :class="{ active: $route.path === '/reports' }">
+            {{ t('nav.reports') }}
           </router-link>
         </nav>
         <LanguageSwitcher />
