@@ -1,7 +1,11 @@
-from fastapi import FastAPI, HTTPException
+import restocking
+import threading
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from mock_data import inventory_items, orders, demand_forecasts, backlog_items, spending_summary, monthly_spending, category_spending, recent_transactions, purchase_orders
 
 app = FastAPI(title="Factory Inventory Management System")
@@ -45,6 +49,17 @@ def apply_filters(items: list, warehouse: Optional[str] = None, category: Option
         filtered = [item for item in filtered if item.get('status', '').lower() == status.lower()]
 
     return filtered
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    """Return 422 without echoing the rejected input.
+
+    The default handler puts the offending value into the response body; for a
+    JSON body with Infinity/NaN that value cannot be serialised and the handler
+    itself crashes with HTTP 500.
+    """
+    errors = [{k: v for k, v in e.items() if k not in ("input", "ctx")} for e in exc.errors()]
+    return JSONResponse(status_code=422, content={"detail": errors})
 
 # CORS middleware
 app.add_middleware(
@@ -119,6 +134,59 @@ class CreatePurchaseOrderRequest(BaseModel):
     unit_cost: float
     expected_delivery_date: str
     notes: Optional[str] = None
+
+class RestockLine(BaseModel):
+    sku: str
+    name: str
+    trend: str
+    quantity_on_hand: int
+    forecasted_demand: int
+    shortfall: int
+    quantity: int
+    unit_cost: float
+    line_total: float
+    lead_time_days: int
+
+class RestockRecommendation(BaseModel):
+    budget: float
+    max_budget: float
+    total_cost: float
+    remaining_budget: float
+    items: List[RestockLine]
+
+class RestockOrderLineRequest(BaseModel):
+    sku: str
+    quantity: int
+
+class CreateRestockOrderRequest(BaseModel):
+    items: List[RestockOrderLineRequest]
+    budget: Optional[float] = Field(None, ge=0, le=restocking.MAX_BUDGET, allow_inf_nan=False)
+
+class RestockOrderLine(BaseModel):
+    sku: str
+    name: str
+    quantity: int
+    unit_cost: float
+    line_total: float
+    lead_time_days: int
+    expected_delivery: str
+
+class RestockOrder(BaseModel):
+    id: str
+    status: str
+    items: List[RestockOrderLine]
+    total_cost: float
+    lead_time_days: int
+    expected_delivery: str
+    submitted_at: str
+    budget: Optional[float] = None
+
+# In-memory store for submitted restocking orders (reset on server restart)
+restocking_orders: List[dict] = []
+# FastAPI runs sync endpoints in a thread pool: the shortfall check, ID assignment
+# and append must happen atomically, otherwise parallel POSTs can reuse an ID
+# or over-order the same shortfall.
+restocking_lock = threading.Lock()
 
 # API endpoints
 @app.get("/")
@@ -228,12 +296,19 @@ def get_recent_transactions():
     return recent_transactions
 
 @app.get("/api/reports/quarterly")
-def get_quarterly_reports():
-    """Get quarterly performance reports"""
+def get_quarterly_reports(
+    warehouse: Optional[str] = None,
+    category: Optional[str] = None,
+    status: Optional[str] = None,
+    month: Optional[str] = None
+):
+    """Get quarterly performance reports (supports the global filters)"""
     # Calculate quarterly statistics from orders
     quarters = {}
+    filtered_orders = apply_filters(orders, warehouse, category, status)
+    filtered_orders = filter_by_month(filtered_orders, month)
 
-    for order in orders:
+    for order in filtered_orders:
         order_date = order.get('order_date', '')
         # Determine quarter
         if '2025-01' in order_date or '2025-02' in order_date or '2025-03' in order_date:
@@ -274,35 +349,75 @@ def get_quarterly_reports():
     return result
 
 @app.get("/api/reports/monthly-trends")
-def get_monthly_trends():
-    """Get month-over-month trends"""
+def get_monthly_trends(
+    warehouse: Optional[str] = None,
+    category: Optional[str] = None,
+    status: Optional[str] = None,
+    month: Optional[str] = None
+):
+    """Get month-over-month trends (supports the global filters)"""
     months = {}
+    filtered_orders = apply_filters(orders, warehouse, category, status)
+    filtered_orders = filter_by_month(filtered_orders, month)
 
-    for order in orders:
+    for order in filtered_orders:
         order_date = order.get('order_date', '')
         if not order_date:
             continue
 
         # Extract month (format: YYYY-MM-DD)
-        month = order_date[:7]  # Gets YYYY-MM
+        order_month = order_date[:7]  # Gets YYYY-MM
 
-        if month not in months:
-            months[month] = {
-                'month': month,
+        if order_month not in months:
+            months[order_month] = {
+                'month': order_month,
                 'order_count': 0,
                 'revenue': 0,
                 'delivered_count': 0
             }
 
-        months[month]['order_count'] += 1
-        months[month]['revenue'] += order.get('total_value', 0)
+        months[order_month]['order_count'] += 1
+        months[order_month]['revenue'] += order.get('total_value', 0)
         if order.get('status') == 'Delivered':
-            months[month]['delivered_count'] += 1
+            months[order_month]['delivered_count'] += 1
 
     # Convert to list and sort
     result = list(months.values())
     result.sort(key=lambda x: x['month'])
     return result
+
+@app.get("/api/restocking/recommendations", response_model=RestockRecommendation)
+def get_restocking_recommendations(
+    budget: float = Query(0, ge=0, le=restocking.MAX_BUDGET, allow_inf_nan=False)
+):
+    """Recommend restock items for a budget (greedy by shortfall, then trend)."""
+    with restocking_lock:
+        incoming = restocking.open_quantities(restocking_orders)
+    candidates = restocking.build_candidates(demand_forecasts, inventory_items, incoming)
+    return restocking.recommend(candidates, budget)
+
+@app.post("/api/restocking/orders", response_model=RestockOrder, status_code=201)
+def create_restocking_order(request: CreateRestockOrderRequest):
+    """Submit a restocking order; prices and lead times are computed server-side."""
+    with restocking_lock:
+        incoming = restocking.open_quantities(restocking_orders)
+        candidates = restocking.build_candidates(demand_forecasts, inventory_items, incoming)
+        try:
+            order = restocking.build_order([l.model_dump() for l in request.items], candidates)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if request.budget is not None and order["total_cost"] > request.budget:
+            raise HTTPException(status_code=400, detail="Order total exceeds the budget")
+        order["id"] = f"RST-{len(restocking_orders) + 1:04d}"
+        order["status"] = "Submitted"
+        order["budget"] = request.budget
+        restocking_orders.append(order)
+    return order
+
+@app.get("/api/restocking/orders", response_model=List[RestockOrder])
+def get_restocking_orders():
+    """List submitted restocking orders, newest first."""
+    return list(reversed(restocking_orders))
 
 if __name__ == "__main__":
     import uvicorn
