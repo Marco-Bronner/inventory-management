@@ -6,6 +6,7 @@ export default {
     orders: 'Orders',
     finance: 'Finance',
     demandForecast: 'Demand Forecast',
+    restocking: 'Restocking',
     companyName: 'Catalyst Components',
     subtitle: 'Inventory Management System'
   },
@@ -106,6 +107,18 @@ export default {
     title: 'Orders',
     description: 'View and manage customer orders',
     allOrders: 'All Orders',
+    submitted: {
+      title: 'Submitted Orders',
+      description: 'Restocking orders placed from the Restocking tab',
+      empty: 'No restocking orders submitted yet.',
+      orderId: 'Order ID',
+      submittedAt: 'Submitted',
+      leadTime: 'Delivery Lead Time',
+      expectedDelivery: 'Expected Delivery',
+      lines: 'Lines',
+      total: 'Total Cost',
+      status: 'Submitted'
+    },
     totalOrders: 'Total Orders',
     totalRevenue: 'Total Revenue',
     avgOrderValue: 'Avg Order Value',
@@ -186,6 +199,34 @@ export default {
       trend: 'Trend',
       period: 'Period'
     }
+  },
+
+  // Restocking
+  restocking: {
+    title: 'Restocking',
+    description: 'Set a budget and order the items with the largest forecasted shortfall',
+    budget: 'Available Budget',
+    budgetHint: 'Items are picked by largest shortfall first, then by trend, until the budget is used up.',
+    totalCost: 'Order Total',
+    remaining: 'Remaining Budget',
+    itemsCount: 'Items to Order',
+    recommendations: 'Recommended Items',
+    noItems: 'The budget is too low to order any item.',
+    placeOrder: 'Place Order',
+    placing: 'Submitting...',
+    orderPlaced: 'Order {id} submitted. Expected delivery: {date}.',
+    orderFailed: 'Order could not be submitted: {message}',
+    table: {
+      sku: 'SKU',
+      item: 'Item',
+      trend: 'Trend',
+      shortfall: 'Shortfall',
+      quantity: 'Quantity',
+      unitCost: 'Unit Cost',
+      lineTotal: 'Line Total',
+      leadTime: 'Lead Time'
+    },
+    days: '{count} days'
   },
 
   // Filters

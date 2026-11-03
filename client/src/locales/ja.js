@@ -6,6 +6,7 @@ export default {
     orders: '注文',
     finance: '財務',
     demandForecast: '需要予測',
+    restocking: '補充発注',
     companyName: '触媒コンポーネンツ',
     subtitle: '在庫管理システム'
   },
@@ -106,6 +107,18 @@ export default {
     title: '注文',
     description: '顧客注文の表示と管理',
     allOrders: 'すべての注文',
+    submitted: {
+      title: '送信済み注文',
+      description: '補充発注タブから送信された注文',
+      empty: '送信済みの補充注文はまだありません。',
+      orderId: '注文ID',
+      submittedAt: '送信日',
+      leadTime: '納品リードタイム',
+      expectedDelivery: '納品予定日',
+      lines: '明細',
+      total: '合計金額',
+      status: '送信済み'
+    },
     totalOrders: '総注文数',
     totalRevenue: '総収益',
     avgOrderValue: '平均注文額',
@@ -186,6 +199,34 @@ export default {
       trend: 'トレンド',
       period: '期間'
     }
+  },
+
+  // Restocking
+  restocking: {
+    title: '補充発注',
+    description: '予算を設定し、予測不足数が大きい品目から発注します',
+    budget: '利用可能な予算',
+    budgetHint: '予測不足数の大きい品目、次にトレンド順に、予算の範囲内で選ばれます。',
+    totalCost: '発注合計',
+    remaining: '残り予算',
+    itemsCount: '発注品目数',
+    recommendations: '推奨品目',
+    noItems: '予算が少なすぎて発注できる品目がありません。',
+    placeOrder: '発注する',
+    placing: '送信中...',
+    orderPlaced: '注文 {id} を送信しました。納品予定日: {date}。',
+    orderFailed: '注文を送信できませんでした: {message}',
+    table: {
+      sku: 'SKU',
+      item: '品目',
+      trend: 'トレンド',
+      shortfall: '不足数',
+      quantity: '数量',
+      unitCost: '単価',
+      lineTotal: '小計',
+      leadTime: 'リードタイム'
+    },
+    days: '{count}日'
   },
 
   // Filters

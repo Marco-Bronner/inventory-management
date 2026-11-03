@@ -27,6 +27,56 @@
         </div>
       </div>
 
+      <div class="card submitted-orders">
+        <div class="card-header">
+          <h3 class="card-title">{{ t('orders.submitted.title') }} ({{ submittedOrders.length }})</h3>
+        </div>
+        <p class="submitted-desc">{{ t('orders.submitted.description') }}</p>
+        <div v-if="submittedOrders.length === 0" class="submitted-empty">{{ t('orders.submitted.empty') }}</div>
+        <div v-else class="table-container">
+          <table class="submitted-table">
+            <thead>
+              <tr>
+                <th>{{ t('orders.submitted.orderId') }}</th>
+                <th>{{ t('orders.submitted.submittedAt') }}</th>
+                <th>{{ t('orders.table.status') }}</th>
+                <th>{{ t('orders.submitted.lines') }}</th>
+                <th>{{ t('orders.submitted.leadTime') }}</th>
+                <th>{{ t('orders.submitted.expectedDelivery') }}</th>
+                <th>{{ t('orders.submitted.total') }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="order in submittedOrders" :key="order.id">
+                <td><strong>{{ order.id }}</strong></td>
+                <td>{{ formatDate(order.submitted_at) }}</td>
+                <td><span class="badge info">{{ t('orders.submitted.status') }}</span></td>
+                <td>
+                  <details class="items-details">
+                    <summary class="items-summary">
+                      {{ t('orders.itemsCount', { count: order.items.length }) }}
+                    </summary>
+                    <div class="items-dropdown">
+                      <div v-for="line in order.items" :key="line.sku" class="item-entry">
+                        <span class="item-name">{{ translateProductName(line.name) }}</span>
+                        <span class="item-meta">
+                          {{ t('orders.quantity') }}: {{ line.quantity }} -
+                          {{ t('restocking.days', { count: line.lead_time_days }) }},
+                          {{ formatDate(line.expected_delivery) }}
+                        </span>
+                      </div>
+                    </div>
+                  </details>
+                </td>
+                <td>{{ t('restocking.days', { count: order.lead_time_days }) }}</td>
+                <td>{{ formatDate(order.expected_delivery) }}</td>
+                <td><strong>{{ formatMoney(order.total_cost) }}</strong></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
       <div class="card">
         <div class="card-header">
           <h3 class="card-title">{{ t('orders.allOrders') }} ({{ orders.length }})</h3>
@@ -83,6 +133,7 @@ import { ref, onMounted, watch, computed } from 'vue'
 import { api } from '../api'
 import { useFilters } from '../composables/useFilters'
 import { useI18n } from '../composables/useI18n'
+import { formatCurrencyWithDecimals } from '../utils/currency'
 
 export default {
   name: 'Orders',
@@ -95,6 +146,18 @@ export default {
     const loading = ref(true)
     const error = ref(null)
     const orders = ref([])
+    const submittedOrders = ref([])
+
+    const formatMoney = (amount) => formatCurrencyWithDecimals(amount, currentCurrency.value, 2)
+
+    // Restocking orders are independent of the customer-order filters
+    const loadSubmittedOrders = async () => {
+      try {
+        submittedOrders.value = await api.getRestockingOrders()
+      } catch (err) {
+        submittedOrders.value = []
+      }
+    }
 
     // Use shared filters
     const {
@@ -153,10 +216,15 @@ export default {
       })
     }
 
-    onMounted(loadOrders)
+    onMounted(() => {
+      loadOrders()
+      loadSubmittedOrders()
+    })
 
     return {
       t,
+      submittedOrders,
+      formatMoney,
       loading,
       error,
       orders,
@@ -172,6 +240,18 @@ export default {
 </script>
 
 <style scoped>
+.submitted-orders {
+  margin-bottom: 1.5rem;
+}
+
+.submitted-desc,
+.submitted-empty {
+  margin: 0;
+  padding: 0 1.5rem 1rem;
+  color: #64748b;
+  font-size: 0.9rem;
+}
+
 /* Fixed table layout to prevent column shifting */
 .orders-table {
   table-layout: fixed;

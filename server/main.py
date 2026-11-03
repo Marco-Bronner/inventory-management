@@ -1,4 +1,5 @@
-from fastapi import FastAPI, HTTPException
+import restocking
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 from pydantic import BaseModel
@@ -119,6 +120,55 @@ class CreatePurchaseOrderRequest(BaseModel):
     unit_cost: float
     expected_delivery_date: str
     notes: Optional[str] = None
+
+class RestockLine(BaseModel):
+    sku: str
+    name: str
+    trend: str
+    quantity_on_hand: int
+    forecasted_demand: int
+    shortfall: int
+    quantity: int
+    unit_cost: float
+    line_total: float
+    lead_time_days: int
+
+class RestockRecommendation(BaseModel):
+    budget: float
+    max_budget: float
+    total_cost: float
+    remaining_budget: float
+    items: List[RestockLine]
+
+class RestockOrderLineRequest(BaseModel):
+    sku: str
+    quantity: int
+
+class CreateRestockOrderRequest(BaseModel):
+    items: List[RestockOrderLineRequest]
+    budget: Optional[float] = None
+
+class RestockOrderLine(BaseModel):
+    sku: str
+    name: str
+    quantity: int
+    unit_cost: float
+    line_total: float
+    lead_time_days: int
+    expected_delivery: str
+
+class RestockOrder(BaseModel):
+    id: str
+    status: str
+    items: List[RestockOrderLine]
+    total_cost: float
+    lead_time_days: int
+    expected_delivery: str
+    submitted_at: str
+    budget: Optional[float] = None
+
+# In-memory store for submitted restocking orders (reset on server restart)
+restocking_orders: List[dict] = []
 
 # API endpoints
 @app.get("/")
@@ -303,6 +353,33 @@ def get_monthly_trends():
     result = list(months.values())
     result.sort(key=lambda x: x['month'])
     return result
+
+@app.get("/api/restocking/recommendations", response_model=RestockRecommendation)
+def get_restocking_recommendations(budget: float = Query(0, ge=0)):
+    """Recommend restock items for a budget (greedy by shortfall, then trend)."""
+    candidates = restocking.build_candidates(demand_forecasts, inventory_items)
+    return restocking.recommend(candidates, budget)
+
+@app.post("/api/restocking/orders", response_model=RestockOrder, status_code=201)
+def create_restocking_order(request: CreateRestockOrderRequest):
+    """Submit a restocking order; prices and lead times are computed server-side."""
+    candidates = restocking.build_candidates(demand_forecasts, inventory_items)
+    try:
+        order = restocking.build_order([l.model_dump() for l in request.items], candidates)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if request.budget is not None and order["total_cost"] > request.budget:
+        raise HTTPException(status_code=400, detail="Order total exceeds the budget")
+    order["id"] = f"RST-{len(restocking_orders) + 1:04d}"
+    order["status"] = "Submitted"
+    order["budget"] = request.budget
+    restocking_orders.append(order)
+    return order
+
+@app.get("/api/restocking/orders", response_model=List[RestockOrder])
+def get_restocking_orders():
+    """List submitted restocking orders, newest first."""
+    return list(reversed(restocking_orders))
 
 if __name__ == "__main__":
     import uvicorn
