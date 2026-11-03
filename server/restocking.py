@@ -14,13 +14,19 @@ overlap with inventory.json):
   only the forecasted growth.
 * Shortfall = max(0, forecasted_demand - on_hand). Items with no shortfall are
   not restock candidates.
+* Already ordered: quantities of submitted restocking orders whose expected
+  delivery date is still in the future count as incoming stock and are
+  subtracted from the shortfall (otherwise the same recommendation could be
+  ordered again and again). Once the delivery date has passed, the goods are
+  assumed to be delivered; they are then expected to show up in inventory.json.
 * Priority: largest shortfall first; ties broken by trend
   (increasing > stable > decreasing), then SKU.
 * Lead time: fixed number of calendar days per SKU prefix (supplier lead time,
   PRODUCT_PROFILES). Expected delivery = order date + lead time; an order's
   expected delivery is the latest of its lines.
 """
-from datetime import datetime, timedelta
+import math
+from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional
 
 DEFAULT_PROFILE = {"unit_cost": 40.0, "lead_time_days": 14}
@@ -49,8 +55,32 @@ def get_lead_time_days(sku: str) -> int:
     return int(_profile(sku)["lead_time_days"])
 
 
-def build_candidates(demand_forecasts: List[dict], inventory_items: List[dict]) -> List[dict]:
-    """Return restock candidates (shortfall > 0) sorted by priority."""
+# Upper bound for a budget; keeps float arithmetic and int() conversions sane.
+MAX_BUDGET = 1_000_000_000.0
+
+
+def open_quantities(orders: List[dict], today: Optional[date] = None) -> Dict[str, int]:
+    """Sum quantities per SKU of submitted orders that are not yet delivered."""
+    today = today or date.today()
+    incoming: Dict[str, int] = {}
+    for order in orders:
+        if order.get("status") != "Submitted":
+            continue
+        for line in order["items"]:
+            # A line stays open until its expected delivery day has passed
+            if date.fromisoformat(line["expected_delivery"]) >= today:
+                incoming[line["sku"]] = incoming.get(line["sku"], 0) + line["quantity"]
+    return incoming
+
+
+def build_candidates(demand_forecasts: List[dict], inventory_items: List[dict],
+                     incoming: Optional[Dict[str, int]] = None) -> List[dict]:
+    """Return restock candidates (shortfall > 0) sorted by priority.
+
+    `incoming` maps SKU -> quantity already ordered and not yet delivered; it is
+    subtracted from the shortfall.
+    """
+    incoming = incoming or {}
     stock: Dict[str, int] = {}
     cost: Dict[str, float] = {}
     for item in inventory_items:
@@ -61,7 +91,7 @@ def build_candidates(demand_forecasts: List[dict], inventory_items: List[dict]) 
     for f in demand_forecasts:
         sku = f["item_sku"]
         on_hand = stock.get(sku, f["current_demand"])
-        shortfall = f["forecasted_demand"] - on_hand
+        shortfall = f["forecasted_demand"] - on_hand - incoming.get(sku, 0)
         if shortfall <= 0:
             continue
         candidates.append({
@@ -81,7 +111,12 @@ def build_candidates(demand_forecasts: List[dict], inventory_items: List[dict]) 
 
 def recommend(candidates: List[dict], budget: float) -> dict:
     """Greedy allocation by priority; the last affordable item may be partially filled."""
-    remaining = max(0.0, float(budget))
+    budget = float(budget)
+    # inf/nan would turn `remaining // unit_cost` into nan and crash int();
+    # the API layer rejects them with 422, this guards direct callers.
+    if not math.isfinite(budget) or budget > MAX_BUDGET:
+        raise ValueError("Budget must be a finite number not above %d" % MAX_BUDGET)
+    remaining = max(0.0, budget)
     lines = []
     for c in candidates:
         qty = min(c["shortfall"], int(remaining // c["unit_cost"]))

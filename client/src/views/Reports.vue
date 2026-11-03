@@ -159,7 +159,10 @@ export default {
 
     const money = (amount) => formatCurrency(amount || 0, currentCurrency.value)
 
+    // Guard against out-of-order responses: only the latest request may write state
+    let requestId = 0
     const loadData = async () => {
+      const id = ++requestId
       try {
         loading.value = true
         error.value = null
@@ -168,12 +171,14 @@ export default {
           api.getQuarterlyReports(filters),
           api.getMonthlyTrends(filters)
         ])
+        if (id !== requestId) return
         quarterlyData.value = quarterly
         monthlyData.value = monthly
       } catch (err) {
+        if (id !== requestId) return
         error.value = t('reports.loadError') + ': ' + err.message
       } finally {
-        loading.value = false
+        if (id === requestId) loading.value = false
       }
     }
 

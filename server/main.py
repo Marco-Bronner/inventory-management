@@ -1,8 +1,11 @@
 import restocking
-from fastapi import FastAPI, HTTPException, Query
+import threading
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from mock_data import inventory_items, orders, demand_forecasts, backlog_items, spending_summary, monthly_spending, category_spending, recent_transactions, purchase_orders
 
 app = FastAPI(title="Factory Inventory Management System")
@@ -46,6 +49,17 @@ def apply_filters(items: list, warehouse: Optional[str] = None, category: Option
         filtered = [item for item in filtered if item.get('status', '').lower() == status.lower()]
 
     return filtered
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    """Return 422 without echoing the rejected input.
+
+    The default handler puts the offending value into the response body; for a
+    JSON body with Infinity/NaN that value cannot be serialised and the handler
+    itself crashes with HTTP 500.
+    """
+    errors = [{k: v for k, v in e.items() if k not in ("input", "ctx")} for e in exc.errors()]
+    return JSONResponse(status_code=422, content={"detail": errors})
 
 # CORS middleware
 app.add_middleware(
@@ -146,7 +160,7 @@ class RestockOrderLineRequest(BaseModel):
 
 class CreateRestockOrderRequest(BaseModel):
     items: List[RestockOrderLineRequest]
-    budget: Optional[float] = None
+    budget: Optional[float] = Field(None, ge=0, le=restocking.MAX_BUDGET, allow_inf_nan=False)
 
 class RestockOrderLine(BaseModel):
     sku: str
@@ -169,6 +183,10 @@ class RestockOrder(BaseModel):
 
 # In-memory store for submitted restocking orders (reset on server restart)
 restocking_orders: List[dict] = []
+# FastAPI runs sync endpoints in a thread pool: the shortfall check, ID assignment
+# and append must happen atomically, otherwise parallel POSTs can reuse an ID
+# or over-order the same shortfall.
+restocking_lock = threading.Lock()
 
 # API endpoints
 @app.get("/")
@@ -369,25 +387,31 @@ def get_monthly_trends(
     return result
 
 @app.get("/api/restocking/recommendations", response_model=RestockRecommendation)
-def get_restocking_recommendations(budget: float = Query(0, ge=0)):
+def get_restocking_recommendations(
+    budget: float = Query(0, ge=0, le=restocking.MAX_BUDGET, allow_inf_nan=False)
+):
     """Recommend restock items for a budget (greedy by shortfall, then trend)."""
-    candidates = restocking.build_candidates(demand_forecasts, inventory_items)
+    with restocking_lock:
+        incoming = restocking.open_quantities(restocking_orders)
+    candidates = restocking.build_candidates(demand_forecasts, inventory_items, incoming)
     return restocking.recommend(candidates, budget)
 
 @app.post("/api/restocking/orders", response_model=RestockOrder, status_code=201)
 def create_restocking_order(request: CreateRestockOrderRequest):
     """Submit a restocking order; prices and lead times are computed server-side."""
-    candidates = restocking.build_candidates(demand_forecasts, inventory_items)
-    try:
-        order = restocking.build_order([l.model_dump() for l in request.items], candidates)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    if request.budget is not None and order["total_cost"] > request.budget:
-        raise HTTPException(status_code=400, detail="Order total exceeds the budget")
-    order["id"] = f"RST-{len(restocking_orders) + 1:04d}"
-    order["status"] = "Submitted"
-    order["budget"] = request.budget
-    restocking_orders.append(order)
+    with restocking_lock:
+        incoming = restocking.open_quantities(restocking_orders)
+        candidates = restocking.build_candidates(demand_forecasts, inventory_items, incoming)
+        try:
+            order = restocking.build_order([l.model_dump() for l in request.items], candidates)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if request.budget is not None and order["total_cost"] > request.budget:
+            raise HTTPException(status_code=400, detail="Order total exceeds the budget")
+        order["id"] = f"RST-{len(restocking_orders) + 1:04d}"
+        order["status"] = "Submitted"
+        order["budget"] = request.budget
+        restocking_orders.append(order)
     return order
 
 @app.get("/api/restocking/orders", response_model=List[RestockOrder])

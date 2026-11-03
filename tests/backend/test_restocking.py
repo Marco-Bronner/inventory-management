@@ -125,3 +125,87 @@ class TestRestockingOrders:
 
     def test_missing_fields_rejected(self, client):
         assert client.post("/api/restocking/orders", json={}).status_code == 422
+
+
+class TestRestockingEdgeBudgets:
+    """inf/nan/huge budgets must be rejected with 422, never crash with 500."""
+
+    @pytest.mark.parametrize("budget", ["inf", "-inf", "nan", "1e308", "1e12"])
+    def test_non_finite_or_huge_budget_rejected(self, client, budget):
+        assert client.get(f"/api/restocking/recommendations?budget={budget}").status_code == 422
+
+    def test_maximum_allowed_budget_works(self, client):
+        response = client.get(f"/api/restocking/recommendations?budget={restocking.MAX_BUDGET}")
+        assert response.status_code == 200
+
+    @pytest.mark.parametrize("budget", ["Infinity", "NaN", "1e12", "-1"])
+    def test_order_budget_rejected(self, client, budget):
+        # raw JSON body: Python's json module would not emit Infinity/NaN as a valid value
+        body = '{"items": [{"sku": "X", "quantity": 1}], "budget": %s}' % budget
+        response = client.post("/api/restocking/orders", content=body,
+                               headers={"Content-Type": "application/json"})
+        assert response.status_code == 422
+
+    def test_recommend_rejects_inf_directly(self):
+        candidates = [{"sku": "A", "shortfall": 5, "unit_cost": 1.0, "trend": "stable"}]
+        with pytest.raises(ValueError):
+            restocking.recommend(candidates, float("inf"))
+
+
+class TestRestockingOpenOrders:
+    """Already ordered, not yet delivered quantities reduce the shortfall."""
+
+    def _first(self, client):
+        return client.get("/api/restocking/recommendations?budget=100000").json()["items"][0]
+
+    def test_full_order_removes_item_from_recommendations(self, client):
+        item = self._first(client)
+        assert client.post("/api/restocking/orders", json={
+            "items": [{"sku": item["sku"], "quantity": item["shortfall"]}]}).status_code == 201
+        skus = [i["sku"] for i in client.get("/api/restocking/recommendations?budget=100000").json()["items"]]
+        assert item["sku"] not in skus
+
+    def test_partial_order_reduces_shortfall(self, client):
+        item = self._first(client)
+        client.post("/api/restocking/orders", json={"items": [{"sku": item["sku"], "quantity": 3}]})
+        after = {i["sku"]: i for i in client.get("/api/restocking/recommendations?budget=100000").json()["items"]}
+        assert after[item["sku"]]["shortfall"] == item["shortfall"] - 3
+
+    def test_same_recommendation_cannot_be_ordered_twice(self, client):
+        item = self._first(client)
+        line = {"items": [{"sku": item["sku"], "quantity": item["shortfall"]}]}
+        assert client.post("/api/restocking/orders", json=line).status_code == 201
+        assert client.post("/api/restocking/orders", json=line).status_code == 400
+        assert len(client.get("/api/restocking/orders").json()) == 1
+
+    def test_max_budget_shrinks_after_order(self, client):
+        before = client.get("/api/restocking/recommendations").json()["max_budget"]
+        item = self._first(client)
+        client.post("/api/restocking/orders", json={"items": [{"sku": item["sku"], "quantity": item["shortfall"]}]})
+        assert client.get("/api/restocking/recommendations").json()["max_budget"] < before
+
+    def test_open_quantities_ignores_delivered_lines(self):
+        from datetime import date
+        orders = [{"status": "Submitted", "items": [
+            {"sku": "A", "quantity": 5, "expected_delivery": "2030-01-10"},
+            {"sku": "B", "quantity": 7, "expected_delivery": "2030-01-01"}]}]
+        assert restocking.open_quantities(orders, today=date(2030, 1, 5)) == {"A": 5}
+        assert restocking.open_quantities(orders, today=date(2030, 1, 10)) == {"A": 5}
+        assert restocking.open_quantities(orders, today=date(2030, 1, 11)) == {}
+
+
+class TestRestockingConcurrency:
+    def test_parallel_posts_get_unique_ids(self, client):
+        from concurrent.futures import ThreadPoolExecutor
+        item = client.get("/api/restocking/recommendations?budget=100000").json()["items"][0]
+        assert item["shortfall"] >= 30
+
+        def post(_):
+            return client.post("/api/restocking/orders", json={"items": [{"sku": item["sku"], "quantity": 1}]})
+
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            responses = list(pool.map(post, range(30)))
+        assert all(r.status_code == 201 for r in responses)
+        ids = [r.json()["id"] for r in responses]
+        assert len(set(ids)) == 30
+        assert len(main.restocking_orders) == 30

@@ -48,7 +48,7 @@
           <h3 class="card-title">{{ t('restocking.recommendations') }}</h3>
           <button
             class="place-order"
-            :disabled="submitting || recommendation.items.length === 0"
+            :disabled="submitting || pending || recommendation.items.length === 0"
             @click="placeOrder"
           >
             {{ submitting ? t('restocking.placing') : t('restocking.placeOrder') }}
@@ -117,6 +117,8 @@ export default {
     const loading = ref(true)
     const error = ref(null)
     const submitting = ref(false)
+    // true while a budget change is waiting for its recommendation (debounce or request in flight)
+    const pending = ref(false)
     const message = ref(null)
     const maxBudget = ref(0)
     const budget = ref(0)
@@ -134,15 +136,28 @@ export default {
       const id = ++requestId
       try {
         const data = await api.getRestockingRecommendations(budget.value)
-        if (id === requestId) recommendation.value = data
+        if (id === requestId) {
+          recommendation.value = data
+          // Orders reduce the shortfall, so the slider range can shrink
+          maxBudget.value = Math.ceil(data.max_budget)
+          if (budget.value > maxBudget.value) budget.value = maxBudget.value
+        }
       } catch (err) {
         error.value = 'Failed to load restocking data: ' + err.message
+      } finally {
+        // Only the latest request clears the flag; an older one must not unlock the button
+        if (id === requestId && !timer) pending.value = false
       }
     }
 
     watch(budget, () => {
+      // The shown items belong to the old budget until the debounced reload finishes
+      pending.value = true
       clearTimeout(timer)
-      timer = setTimeout(loadRecommendation, 120)
+      timer = setTimeout(() => {
+        timer = null
+        loadRecommendation()
+      }, 120)
     })
 
     const placeOrder = async () => {
@@ -151,13 +166,17 @@ export default {
       try {
         const order = await api.createRestockingOrder({
           items: recommendation.value.items.map(i => ({ sku: i.sku, quantity: i.quantity })),
-          budget: budget.value
+          // Budget the shown items were computed for, not the (possibly newer) slider value
+          budget: recommendation.value.budget
         })
         const locale = currentLocale.value === 'ja' ? 'ja-JP' : 'en-US'
         const date = new Date(order.expected_delivery + 'T00:00:00').toLocaleDateString(locale, {
           year: 'numeric', month: 'short', day: 'numeric'
         })
         message.value = { type: 'success', text: t('restocking.orderPlaced', { id: order.id, date }) }
+        // The ordered quantities no longer count as shortfall: refresh the table
+        pending.value = true
+        await loadRecommendation()
       } catch (err) {
         const detail = err.response?.data?.detail || err.message
         message.value = { type: 'error', text: t('restocking.orderFailed', { message: detail }) }
@@ -179,13 +198,17 @@ export default {
       }
     })
 
-    onBeforeUnmount(() => clearTimeout(timer))
+    onBeforeUnmount(() => {
+      clearTimeout(timer)
+      timer = null
+    })
 
     return {
       t,
       loading,
       error,
       submitting,
+      pending,
       message,
       maxBudget,
       budget,
